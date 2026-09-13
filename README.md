@@ -74,7 +74,7 @@ Liam's own interactive work, but agents must not use it for writes.
 
 The `xdega-bot-pr` helper provides the supported agent workflow. From any GitHub repository
 on which the App is installed, it commits reviewed, explicitly staged changes as the bot,
-pushes with a short-lived repository-scoped installation token, and opens or reuses a pull
+pushes with a short-lived repository-scoped installation token, and opens or updates a pull
 request:
 
 ```bash

@@ -52,6 +52,7 @@ assert_contains '{repositories: [$repository], permissions: {contents: "write", 
 assert_contains 'select(.repositories | length == 1)' "$HELPER"
 assert_contains 'GIT_CONFIG_GLOBAL=/dev/null' "$HELPER"
 assert_contains 'GH_CONFIG_DIR="$GH_CONFIG_DIR"' "$HELPER"
+assert_contains 'app_gh pr edit "$EXISTING_PR" --title "$PR_TITLE" --body-file "$PR_BODY_FILE"' "$HELPER"
 assert_contains 'git -c core.hooksPath=/dev/null' "$HELPER"
 if grep -F 'git add -A' "$HELPER" >/dev/null; then
   fail "helper must not stage the entire worktree"

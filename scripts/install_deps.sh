@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 #
 # install_deps.sh — installs everything these dotfiles assume is present:
-#   Homebrew, GNU Stow, Warp, Vim, nvm (+ Node/npm), pi, oh-my-zsh, vim-plug.
+#   Homebrew, GNU Stow, Warp, Vim, nvm (+ Node/npm), pi, oh-my-zsh, vim-plug,
+#   and the shared command-line tools used for iOS and Supabase development.
 #
 # Safe to re-run: every step checks whether its target is already installed
 # before doing anything.
@@ -47,6 +48,34 @@ if ! command -v vim >/dev/null 2>&1; then
   brew install vim
 else
   skip "Vim"
+fi
+
+# --- Development command-line tools ----------------------------------------
+for tool in gh jq swiftformat swiftlint xcodegen; do
+  if ! command -v "$tool" >/dev/null 2>&1; then
+    info "Installing $tool"
+    brew install "$tool"
+  else
+    skip "$tool"
+  fi
+done
+
+if ! brew list --cask docker-desktop >/dev/null 2>&1 \
+  && [ ! -d "/Applications/Docker.app" ]; then
+  info "Installing Docker Desktop"
+  brew install --cask docker-desktop
+else
+  skip "Docker Desktop"
+fi
+
+# Supabase releases independently of projects that may pin an older CLI.
+# Install the global CLI for convenience; projects should use their documented
+# npx fallback whenever this version differs from their required version.
+if ! command -v supabase >/dev/null 2>&1; then
+  info "Installing Supabase CLI"
+  brew install supabase/tap/supabase
+else
+  skip "Supabase CLI"
 fi
 
 # --- oh-my-zsh -------------------------------------------------------------
@@ -99,4 +128,5 @@ else
   skip "vim-plug"
 fi
 
-info "All dependencies installed."
+info "All automated dependencies installed."
+info "Manual setup may still be required for Xcode/iOS runtimes, Docker's first launch, and tool authentication."

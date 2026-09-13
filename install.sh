@@ -2,8 +2,8 @@
 #
 # install.sh — one-shot bootstrap for these dotfiles.
 #
-#   1. Installs dependencies (Homebrew, Stow, Warp, Vim, nvm/Node, pi,
-#      oh-my-zsh, vim-plug) — see scripts/install_deps.sh.
+#   1. Installs shell/editor dependencies and shared development tooling —
+#      see scripts/install_deps.sh.
 #   2. Backs up any existing dotfiles that would conflict, then symlinks
 #      every package into $HOME via GNU Stow — see scripts/stow_link.sh.
 #   3. Installs Vim plugins headlessly via vim-plug.

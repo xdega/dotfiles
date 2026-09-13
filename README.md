@@ -8,13 +8,13 @@ Each top-level directory is a **Stow package**: its contents mirror the layout o
 
 ```
 dotfiles/
-├── git/                    # .gitconfig, .gitignore_global, .git-prompt.sh
+├── git/                    # Git config plus ~/.local/bin/xdega-bot-pr
 ├── vim/                    # .vimrc, .vim/colors/*
 ├── zsh/                    # .zshrc, .oh-my-zsh/custom/*
 ├── warp/                   # .warp/settings.toml
-├── pi/                     # .pi/agent/settings.json
+├── pi/                     # Pi settings, extensions, and global agent instructions
 ├── scripts/
-│   ├── install_deps.sh     # installs Homebrew, Warp, Vim, nvm/Node, pi, oh-my-zsh, vim-plug
+│   ├── install_deps.sh     # installs shell/editor tools plus shared iOS/backend dev tooling
 │   └── stow_link.sh        # backs up conflicts + symlinks packages with Stow
 └── install.sh              # runs both of the above, end to end
 ```
@@ -41,6 +41,68 @@ Some things are deliberately **not** tracked here, because they're installed/gen
 | [nvm](https://github.com/nvm-sh/nvm) (+ Node/npm) | `curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.6/install.sh \| bash`, then `nvm install --lts` |
 | [pi](https://pi.dev) | `curl -fsSL https://pi.dev/install.sh \| sh` |
 | [vim-plug](https://github.com/junegunn/vim-plug) | `curl -fLo ~/.vim/autoload/plug.vim --create-dirs ...` |
+| GitHub CLI and jq | `brew install gh jq` |
+| XcodeGen, SwiftFormat, and SwiftLint | `brew install xcodegen swiftformat swiftlint` |
+| Docker Desktop | `brew install --cask docker-desktop` |
+| Supabase CLI | `brew install supabase/tap/supabase` |
+
+When Supabase is absent, the bootstrap installs Homebrew's current CLI release; it does not
+auto-upgrade an existing installation. Projects that pin a specific version should keep that
+pin in the project and use its documented version wrapper.
+For example, Vantorix falls back to `npx --yes supabase@2.116.0` when the global CLI is not
+exactly 2.116.0; Node/npm installed by this bootstrap provides that fallback.
+
+### Manual development setup
+
+The bootstrap installs binaries and configuration, but intentionally does not automate
+licenses, large platform downloads, authentication, or secrets. On a new development Mac:
+
+1. Install Xcode from the App Store or Apple Developer downloads, select it with
+   `xcode-select`, accept its license, and run its first-launch setup.
+2. In Xcode, install the required iOS runtime and create or download the simulator models
+   required by each project (Vantorix currently uses iPhone 17).
+3. Launch Docker Desktop once, approve its prompts, and wait for its engine to start.
+4. Authenticate tools as needed, such as `gh auth login` and `supabase login`; perform
+   project-specific Supabase linking only from that project's setup instructions.
+5. Store project credentials and automation keys in the project's ignored configuration or
+   macOS Keychain. Never add them to this repository.
+
+### Agent GitHub identity
+
+Global Pi instructions require every agent-authored GitHub mutation to use the `xdega-bot`
+GitHub App. Personal `gh` authentication remains available for read-only inspection and for
+Liam's own interactive work, but agents must not use it for writes.
+
+The `xdega-bot-pr` helper provides the supported agent workflow. From any GitHub repository
+on which the App is installed, it commits reviewed, explicitly staged changes as the bot,
+pushes with a short-lived repository-scoped installation token, and opens or updates a pull
+request:
+
+```bash
+git add path/to/reviewed-file another/reviewed-file
+PR_TITLE="Describe the change" PR_BODY_FILE=/tmp/pr-body.md \
+  xdega-bot-pr feature/my-change "Describe the change"
+```
+
+The helper requests only `contents:write` and `pull_requests:write`, validates that GitHub
+returns exactly the current repository, revokes the token on exit, and fails closed rather
+than falling back to personal credentials. The App must be installed on each target
+repository with those permissions.
+
+Store the App's base64-encoded PEM private key in a macOS Keychain generic-password item:
+
+| Field | Value |
+|---|---|
+| Service | `vantorix-github-app-private-key` |
+| Account | `4926192` |
+| Password | Base64-encoded PEM private key |
+
+The existing Vantorix-named Keychain service is intentionally retained as the global helper's
+canonical item so lifting the workflow does not copy or expose the private key. The service
+name can be migrated separately through Keychain Access if desired. Do not store the private
+key in this repository, shell history, environment files, or GitHub CLI config. Mutations
+outside the helper's commit/push/PR workflow are intentionally unsupported; an agent must stop
+and ask rather than use Liam's identity.
 
 ## Installation (new machine)
 
@@ -78,6 +140,9 @@ Only then does it run `stow -R` (restow), so the repo's version always ends up l
 You may also notice small empty `.stow-keep` files appear inside stowed directories in `~` (e.g. `~/.pi/agent/.stow-keep`). These are harmless — they stop Stow from collapsing a directory that's *currently* only got one stowed file in it (like `~/.pi/agent`) into a single symlink, which would otherwise cause anything later written there by the real tool (`~/.pi/agent/auth.json`, session data, etc.) to land physically inside this git repo instead of your home directory. Leave them in place.
 
 ## Updating & syncing
+
+The direct `git commit` and `git push` examples in this section are for Liam's manual use.
+Agents must instead stage only reviewed files and use `xdega-bot-pr` as described above.
 
 ### Pulling down changes made elsewhere
 

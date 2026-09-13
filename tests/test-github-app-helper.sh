@@ -44,7 +44,7 @@ cleanup() {
 trap cleanup EXIT
 
 [[ -x "$HELPER" ]] || fail "$HELPER must be executable"
-[[ "$(head -1 "$HELPER")" == '#!/bin/bash' ]] || fail "helper must use an absolute interpreter"
+[[ "$(head -1 "$HELPER")" == '#!/bin/bash -p' ]] || fail "helper must use a privileged absolute interpreter"
 bash -n "$HELPER"
 
 assert_contains 'readonly KEYCHAIN_SERVICE="vantorix-github-app-private-key"' "$HELPER"
@@ -59,6 +59,10 @@ if grep -F 'git add -A' "$HELPER" >/dev/null; then
 fi
 
 run_expect_failure 'error: PR_TITLE is required' "$HELPER"
+printf 'touch %q\n' "$TMP_ROOT/bash-env-executed" >"$TMP_ROOT/bash-env"
+run_expect_failure 'error: PR_TITLE is required' \
+  env BASH_ENV="$TMP_ROOT/bash-env" "$HELPER"
+[[ ! -e "$TMP_ROOT/bash-env-executed" ]] || fail "helper sourced inherited BASH_ENV"
 
 TEST_REPO="$TMP_ROOT/repository"
 mkdir "$TEST_REPO"
@@ -82,12 +86,26 @@ git -C "$TEST_REPO" add tracked
 run_in_repo_expect_failure 'index has staged changes; provide a commit message' \
   env PR_TITLE=Test PR_BODY_FILE="$TMP_ROOT/body.md" \
   "$HELPER" feature/test
+git -C "$TEST_REPO" reset -q --hard HEAD
+git -C "$TEST_REPO" switch -q -c alternate
+cat >"$TEST_REPO/.git/hooks/post-checkout" <<EOF
+#!/bin/bash
+touch "$TMP_ROOT/post-checkout-executed"
+EOF
+chmod +x "$TEST_REPO/.git/hooks/post-checkout"
+printf 'untracked\n' >"$TEST_REPO/untracked"
+run_in_repo_expect_failure 'worktree has unstaged changes' \
+  env PR_TITLE=Test PR_BODY_FILE="$TMP_ROOT/body.md" \
+  "$HELPER" feature/test 'Test commit'
+[[ ! -e "$TMP_ROOT/post-checkout-executed" ]] || fail "helper executed a post-checkout hook"
+[[ "$(git -C "$TEST_REPO" branch --show-current)" == 'feature/test' ]] \
+  || fail "helper did not switch to the requested branch"
 
 if [[ -f "$WRAPPER" ]]; then
   bash -n "$WRAPPER"
   assert_contains 'readonly HELPER="/Users/liam/.local/bin/xdega-bot-pr"' "$WRAPPER"
   assert_contains '"$HELPER" -ef "$EXPECTED_HELPER"' "$WRAPPER"
-  assert_contains 'exec /bin/bash "$HELPER" "$@"' "$WRAPPER"
+  assert_contains 'exec /bin/bash -p "$HELPER" "$@"' "$WRAPPER"
 
   mkdir "$TMP_ROOT/fake-bin"
   cat >"$TMP_ROOT/fake-bin/xdega-bot-pr" <<EOF
@@ -98,6 +116,9 @@ EOF
   run_expect_failure 'error: PR_TITLE is required' \
     env PATH="$TMP_ROOT/fake-bin:/usr/bin:/bin" "$WRAPPER"
   [[ ! -e "$TMP_ROOT/path-hijacked" ]] || fail "wrapper executed a PATH-injected helper"
+  run_expect_failure 'error: PR_TITLE is required' \
+    env BASH_ENV="$TMP_ROOT/bash-env" "$WRAPPER"
+  [[ ! -e "$TMP_ROOT/bash-env-executed" ]] || fail "wrapper sourced inherited BASH_ENV"
 
   chmod g+w "$HELPER"
   run_expect_failure 'trusted helper must be owned by the current user and not group/world writable' \

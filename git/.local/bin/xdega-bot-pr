@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/bash -p
 set -euo pipefail
 set +x
 umask 077
@@ -103,6 +103,15 @@ repository_name="${origin_repository#*/}"
 [[ -n "$repository_owner" && -n "$repository_name" && "$repository_name" != "$origin_repository" ]] \
   || fail "unable to parse the GitHub repository from origin"
 
+CURRENT_BRANCH="$(git branch --show-current)"
+if [[ "$CURRENT_BRANCH" != "$BRANCH_NAME" ]]; then
+  if git show-ref --verify --quiet "refs/heads/$BRANCH_NAME"; then
+    git -c core.hooksPath=/dev/null switch -- "$BRANCH_NAME"
+  else
+    git -c core.hooksPath=/dev/null switch -c "$BRANCH_NAME"
+  fi
+fi
+
 readonly LOCK_DIR="$(git rev-parse --path-format=absolute --git-common-dir)/xdega-bot-pr.lock"
 if ! mkdir "$LOCK_DIR" 2>/dev/null; then
   fail "another xdega-bot-pr invocation may be running; remove '$LOCK_DIR' only if it is stale"
@@ -148,10 +157,12 @@ base64url() {
 
 # Reject unsafe or incomplete commit state before reading the App key or making
 # any network request. Only explicitly staged paths may enter the bot commit.
+STAGED_TREE=""
 if ! git diff --cached --quiet; then
   [[ -n "$COMMIT_MESSAGE" ]] \
     || fail "index has staged changes; provide a commit message"
   git diff --cached --check || fail "staged diff contains whitespace errors"
+  STAGED_TREE="$(git write-tree)" || fail "unable to record the reviewed staged tree"
 elif [[ -n "$(git status --porcelain)" ]]; then
   fail "worktree has unstaged changes; review and stage only the files intended for the bot commit"
 fi
@@ -281,20 +292,13 @@ app_gh() {
     gh "$@"
 }
 
-CURRENT_BRANCH="$(git branch --show-current)"
-if [[ "$CURRENT_BRANCH" != "$BRANCH_NAME" ]]; then
-  if git show-ref --verify --quiet "refs/heads/$BRANCH_NAME"; then
-    git switch -- "$BRANCH_NAME"
-  else
-    git switch -c "$BRANCH_NAME"
-  fi
-fi
-
 repository_push_url="https://github.com/$repository_full_name.git"
 app_git fetch --quiet "$repository_push_url" \
   "refs/heads/$BASE_BRANCH:refs/remotes/origin/$BASE_BRANCH"
 
-if ! git diff --cached --quiet; then
+if [[ -n "$STAGED_TREE" ]]; then
+  [[ "$(git write-tree)" == "$STAGED_TREE" ]] \
+    || fail "staged content changed after review; refusing to commit"
   GIT_AUTHOR_NAME="$BOT_LOGIN" \
   GIT_AUTHOR_EMAIL="$BOT_EMAIL" \
   GIT_COMMITTER_NAME="$BOT_LOGIN" \

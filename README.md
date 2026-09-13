@@ -14,7 +14,7 @@ dotfiles/
 ├── warp/                   # .warp/settings.toml
 ├── pi/                     # .pi/agent/settings.json
 ├── scripts/
-│   ├── install_deps.sh     # installs Homebrew, Warp, Vim, nvm/Node, pi, oh-my-zsh, vim-plug
+│   ├── install_deps.sh     # installs shell/editor tools plus shared iOS/backend dev tooling
 │   └── stow_link.sh        # backs up conflicts + symlinks packages with Stow
 └── install.sh              # runs both of the above, end to end
 ```
@@ -41,6 +41,30 @@ Some things are deliberately **not** tracked here, because they're installed/gen
 | [nvm](https://github.com/nvm-sh/nvm) (+ Node/npm) | `curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.6/install.sh \| bash`, then `nvm install --lts` |
 | [pi](https://pi.dev) | `curl -fsSL https://pi.dev/install.sh \| sh` |
 | [vim-plug](https://github.com/junegunn/vim-plug) | `curl -fLo ~/.vim/autoload/plug.vim --create-dirs ...` |
+| GitHub CLI and jq | `brew install gh jq` |
+| XcodeGen, SwiftFormat, and SwiftLint | `brew install xcodegen swiftformat swiftlint` |
+| Docker Desktop | `brew install --cask docker-desktop` |
+| Supabase CLI | `brew install supabase/tap/supabase` |
+
+The globally installed Supabase CLI tracks Homebrew's current release. Projects that pin a
+specific version should keep that pin in the project and use its documented version wrapper.
+For example, Vantorix falls back to `npx --yes supabase@2.116.0` when the global CLI is not
+exactly 2.116.0; Node/npm installed by this bootstrap provides that fallback.
+
+### Manual development setup
+
+The bootstrap installs binaries and configuration, but intentionally does not automate
+licenses, large platform downloads, authentication, or secrets. On a new development Mac:
+
+1. Install Xcode from the App Store or Apple Developer downloads, select it with
+   `xcode-select`, accept its license, and run its first-launch setup.
+2. In Xcode, install the required iOS runtime and create or download the simulator models
+   required by each project (Vantorix currently uses iPhone 17).
+3. Launch Docker Desktop once, approve its prompts, and wait for its engine to start.
+4. Authenticate tools as needed, such as `gh auth login` and `supabase login`; perform
+   project-specific Supabase linking only from that project's setup instructions.
+5. Store project credentials and automation keys in the project's ignored configuration or
+   macOS Keychain. Never add them to this repository.
 
 ## Installation (new machine)
 

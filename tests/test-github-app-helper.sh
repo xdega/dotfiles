@@ -88,6 +88,14 @@ run_in_repo_expect_failure 'index has staged changes; provide a commit message' 
   "$HELPER" feature/test
 git -C "$TEST_REPO" reset -q --hard HEAD
 git -C "$TEST_REPO" switch -q -c alternate
+mkdir "$TEST_REPO/.git/xdega-bot-pr.lock"
+run_in_repo_expect_failure 'another xdega-bot-pr invocation may be running' \
+  env PR_TITLE=Test PR_BODY_FILE="$TMP_ROOT/body.md" \
+  "$HELPER" feature/test 'Test commit'
+[[ "$(git -C "$TEST_REPO" branch --show-current)" == 'alternate' ]] \
+  || fail "helper switched branches before acquiring the repository lock"
+rmdir "$TEST_REPO/.git/xdega-bot-pr.lock"
+
 cat >"$TEST_REPO/.git/hooks/post-checkout" <<EOF
 #!/bin/bash
 touch "$TMP_ROOT/post-checkout-executed"

@@ -46,8 +46,9 @@ Some things are deliberately **not** tracked here, because they're installed/gen
 | Docker Desktop | `brew install --cask docker-desktop` |
 | Supabase CLI | `brew install supabase/tap/supabase` |
 
-The globally installed Supabase CLI tracks Homebrew's current release. Projects that pin a
-specific version should keep that pin in the project and use its documented version wrapper.
+When Supabase is absent, the bootstrap installs Homebrew's current CLI release; it does not
+auto-upgrade an existing installation. Projects that pin a specific version should keep that
+pin in the project and use its documented version wrapper.
 For example, Vantorix falls back to `npx --yes supabase@2.116.0` when the global CLI is not
 exactly 2.116.0; Node/npm installed by this bootstrap provides that fallback.
 

@@ -1,0 +1,341 @@
+#!/bin/bash
+set -euo pipefail
+set +x
+umask 077
+
+PATH="/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin:$HOME/homebrew/bin"
+export PATH
+unset ALL_PROXY CURL_CA_BUNDLE GH_DEBUG GIT_CONFIG_COUNT GIT_CONFIG_GLOBAL \
+  GIT_CONFIG_NOSYSTEM GIT_CONFIG_PARAMETERS GIT_CONFIG_SYSTEM GIT_CURL_VERBOSE \
+  GIT_SSL_CAINFO GIT_SSL_NO_VERIFY GIT_TRACE GIT_TRACE_CURL GIT_TRACE_PACKET \
+  GIT_TRACE_PERFORMANCE GIT_TRACE_SETUP GIT_TRACE2 GIT_TRACE2_EVENT GIT_TRACE2_PERF \
+  HTTPS_PROXY HTTP_PROXY SSL_CERT_FILE all_proxy https_proxy http_proxy
+
+# Commit, push, and open or reuse a PR as the xdega-bot GitHub App.
+# The App must be installed on the repository with Contents and Pull requests
+# read/write permissions.
+#
+# Usage:
+#   PR_TITLE="..." PR_BODY_FILE=/path/to/body.md \
+#     xdega-bot-pr [branch-name] [commit-message]
+#
+# Optional environment variables:
+#   PR_BASE=main
+#   PR_DRAFT=true
+
+readonly APP_ID="4926192"
+readonly APP_SLUG="xdega-bot"
+readonly BOT_LOGIN="xdega-bot[bot]"
+readonly BOT_EMAIL="328567679+xdega-bot[bot]@users.noreply.github.com"
+# Retain the existing service name so lifting the helper does not copy or expose the App key.
+readonly KEYCHAIN_SERVICE="vantorix-github-app-private-key"
+readonly KEYCHAIN_ACCOUNT="$APP_ID"
+readonly GITHUB_API="https://api.github.com"
+readonly MAX_TOKEN_LIFETIME_SECONDS=3900
+readonly MIN_TOKEN_LIFETIME_SECONDS=300
+
+fail() {
+  echo "error: $*" >&2
+  exit 1
+}
+
+for command_name in curl gh git jq mktemp openssl security; do
+  command -v "$command_name" >/dev/null 2>&1 || fail "$command_name is required"
+done
+
+ROOT_DIR="$(git rev-parse --show-toplevel 2>/dev/null)" \
+  || fail "run this command from inside a Git repository"
+cd "$ROOT_DIR"
+
+BASE_BRANCH="${PR_BASE:-main}"
+BRANCH_NAME="${1:-}"
+COMMIT_MESSAGE="${2:-}"
+PR_DRAFT="${PR_DRAFT:-false}"
+PR_TITLE="${PR_TITLE:-}"
+PR_BODY_FILE="${PR_BODY_FILE:-}"
+
+[[ -n "$PR_TITLE" ]] || fail "PR_TITLE is required"
+[[ -n "$PR_BODY_FILE" ]] || fail "PR_BODY_FILE is required"
+[[ -f "$PR_BODY_FILE" ]] || fail "PR_BODY_FILE '$PR_BODY_FILE' does not exist"
+[[ "$PR_DRAFT" == "true" || "$PR_DRAFT" == "false" ]] || fail "PR_DRAFT must be true or false"
+git check-ref-format --branch "$BASE_BRANCH" >/dev/null 2>&1 \
+  || fail "invalid base branch '$BASE_BRANCH'"
+
+if [[ -z "$BRANCH_NAME" ]]; then
+  BRANCH_NAME="$(git branch --show-current)"
+  [[ -n "$BRANCH_NAME" ]] || fail "detached HEAD; provide a feature branch name"
+  [[ "$BRANCH_NAME" != "$BASE_BRANCH" ]] \
+    || fail "provide a feature branch name when running from $BASE_BRANCH"
+fi
+
+git check-ref-format --branch "$BRANCH_NAME" >/dev/null 2>&1 \
+  || fail "invalid branch name '$BRANCH_NAME'"
+[[ "$BRANCH_NAME" != "$BASE_BRANCH" ]] \
+  || fail "refusing to open a PR from base branch '$BASE_BRANCH'"
+[[ "$BRANCH_NAME" != "main" ]] || fail "refusing to push directly to protected branch 'main'"
+
+if git config --get-regexp '^url\.' >/dev/null 2>&1; then
+  fail "Git URL rewrite configuration must be disabled before using bot credentials"
+fi
+if git config --local --get-regexp \
+  '^(http\.|core\.hookspath$|include\.|includeif\.)' >/dev/null 2>&1; then
+  fail "repository Git HTTP, TLS, proxy, hook, or include overrides are not allowed"
+fi
+
+origin_url="$(git remote get-url origin 2>/dev/null)" || fail "git remote 'origin' is required"
+case "$origin_url" in
+  https://github.com/*)
+    origin_repository="${origin_url#https://github.com/}"
+    ;;
+  git@github.com:*)
+    origin_repository="${origin_url#git@github.com:}"
+    ;;
+  ssh://git@github.com/*)
+    origin_repository="${origin_url#ssh://git@github.com/}"
+    ;;
+  *)
+    fail "origin must be a github.com HTTPS or SSH remote"
+    ;;
+esac
+origin_repository="${origin_repository%.git}"
+repository_owner="${origin_repository%%/*}"
+repository_name="${origin_repository#*/}"
+[[ -n "$repository_owner" && -n "$repository_name" && "$repository_name" != "$origin_repository" ]] \
+  || fail "unable to parse the GitHub repository from origin"
+
+readonly LOCK_DIR="$(git rev-parse --path-format=absolute --git-common-dir)/xdega-bot-pr.lock"
+if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+  fail "another xdega-bot-pr invocation may be running; remove '$LOCK_DIR' only if it is stale"
+fi
+
+TEMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/xdega-bot-pr.XXXXXX")"
+chmod 700 "$TEMP_DIR"
+AUTH_HEADER_FILE="$TEMP_DIR/auth-header"
+API_RESPONSE_FILE="$TEMP_DIR/api-response.json"
+ASKPASS_FILE="$TEMP_DIR/git-askpass.sh"
+GH_CONFIG_DIR="$TEMP_DIR/gh"
+unset CLEANUP_TOKEN JWT INSTALLATION_TOKEN PRIVATE_KEY_B64
+CLEANUP_TOKEN=""
+JWT=""
+INSTALLATION_TOKEN=""
+PRIVATE_KEY_B64=""
+
+cleanup() {
+  if [[ -n "${CLEANUP_TOKEN:-}" && -d "${TEMP_DIR:-}" ]]; then
+    printf 'Authorization: Bearer %s\n' "$CLEANUP_TOKEN" >"$AUTH_HEADER_FILE"
+    if ! curl --disable --silent --show-error --fail --request DELETE \
+      --header @"$AUTH_HEADER_FILE" \
+      --header 'Accept: application/vnd.github+json' \
+      --header 'X-GitHub-Api-Version: 2022-11-28' \
+      --header "User-Agent: $APP_SLUG" \
+      --output /dev/null \
+      "$GITHUB_API/installation/token"; then
+      echo "warning: installation-token revocation failed; GitHub expiry remains active" >&2
+    fi
+  fi
+  unset CLEANUP_TOKEN JWT INSTALLATION_TOKEN PRIVATE_KEY_B64
+  rm -rf "${TEMP_DIR:-}"
+  rmdir "${LOCK_DIR:-}" 2>/dev/null || true
+}
+trap cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+base64url() {
+  openssl base64 -A | tr '+/' '-_' | tr -d '='
+}
+
+# Reject unsafe or incomplete commit state before reading the App key or making
+# any network request. Only explicitly staged paths may enter the bot commit.
+if ! git diff --cached --quiet; then
+  [[ -n "$COMMIT_MESSAGE" ]] \
+    || fail "index has staged changes; provide a commit message"
+  git diff --cached --check || fail "staged diff contains whitespace errors"
+elif [[ -n "$(git status --porcelain)" ]]; then
+  fail "worktree has unstaged changes; review and stage only the files intended for the bot commit"
+fi
+
+PRIVATE_KEY_B64="$(security find-generic-password \
+  -s "$KEYCHAIN_SERVICE" -a "$KEYCHAIN_ACCOUNT" -w 2>/dev/null)" \
+  || fail "GitHub App private key was not found in Keychain service '$KEYCHAIN_SERVICE'"
+[[ -n "$PRIVATE_KEY_B64" ]] || fail "GitHub App private key Keychain value is empty"
+printf '%s' "$PRIVATE_KEY_B64" \
+  | tr -d '[:space:]' \
+  | openssl base64 -d -A 2>/dev/null \
+  | openssl rsa -check -noout >/dev/null 2>&1 \
+  || fail "Keychain value is not a valid base64-encoded RSA private key"
+
+issued_at="$(date +%s)"
+expires_at="$((issued_at + 540))"
+header="$(printf '%s' '{"alg":"RS256","typ":"JWT"}' | base64url)"
+payload="$(printf '{"iat":%s,"exp":%s,"iss":"%s"}' \
+  "$((issued_at - 60))" "$expires_at" "$APP_ID" | base64url)"
+signing_input="$header.$payload"
+signature="$(printf '%s' "$signing_input" \
+  | openssl dgst -sha256 \
+      -sign <(printf '%s' "$PRIVATE_KEY_B64" | tr -d '[:space:]' | openssl base64 -d -A) \
+      -binary 2>/dev/null \
+  | base64url)"
+JWT="$signing_input.$signature"
+PRIVATE_KEY_B64=""
+
+printf 'Authorization: Bearer %s\n' "$JWT" >"$AUTH_HEADER_FILE"
+chmod 600 "$AUTH_HEADER_FILE"
+curl --disable --silent --show-error --fail \
+  --header @"$AUTH_HEADER_FILE" \
+  --header 'Accept: application/vnd.github+json' \
+  --header 'X-GitHub-Api-Version: 2022-11-28' \
+  --header "User-Agent: $APP_SLUG" \
+  --output "$API_RESPONSE_FILE" \
+  "$GITHUB_API/repos/$origin_repository/installation" \
+  || fail "xdega-bot is not installed on '$origin_repository'"
+installation_id="$(jq -er '.id | select(type == "number")' "$API_RESPONSE_FILE" 2>/dev/null)" \
+  || fail "GitHub returned no installation ID for '$origin_repository'"
+installation_owner="$(jq -er '.account.login | select(type == "string" and length > 0)' \
+  "$API_RESPONSE_FILE" 2>/dev/null)" || fail "GitHub returned no installation owner"
+[[ "$(printf '%s' "$installation_owner" | tr '[:upper:]' '[:lower:]')" \
+  == "$(printf '%s' "$repository_owner" | tr '[:upper:]' '[:lower:]')" ]] \
+  || fail "GitHub App installation owner does not match origin owner"
+
+request_body="$(jq -cn --arg repository "$repository_name" \
+  '{repositories: [$repository], permissions: {contents: "write", pull_requests: "write"}}')"
+curl --disable --silent --show-error --fail \
+  --request POST \
+  --header @"$AUTH_HEADER_FILE" \
+  --header 'Accept: application/vnd.github+json' \
+  --header 'X-GitHub-Api-Version: 2022-11-28' \
+  --header "User-Agent: $APP_SLUG" \
+  --data "$request_body" \
+  --output "$API_RESPONSE_FILE" \
+  "$GITHUB_API/app/installations/$installation_id/access_tokens" \
+  || fail "GitHub rejected the repository-scoped installation-token request"
+
+CLEANUP_TOKEN="$(jq -er '.token | select(type == "string" and length > 0)' \
+  "$API_RESPONSE_FILE" 2>/dev/null)" || fail "GitHub returned no installation token"
+INSTALLATION_TOKEN="$(jq -er --arg repository "$origin_repository" \
+  '.token as $token
+   | select(.permissions.contents == "write")
+   | select(.permissions.pull_requests == "write")
+   | select(
+       [.permissions | to_entries[]
+        | select(
+            (.key != "contents")
+            and (.key != "pull_requests")
+            and ((.key != "metadata") or (.value != "read"))
+          )] | length == 0
+     )
+   | select((.repositories | type) == "array")
+   | select(.repositories | length == 1)
+   | select((.repositories[0].full_name | ascii_downcase) == ($repository | ascii_downcase))
+   | $token' "$API_RESPONSE_FILE" 2>/dev/null)" \
+  || fail "GitHub returned an unexpected repository scope or permission set"
+[[ -n "$INSTALLATION_TOKEN" ]] || fail "GitHub returned an empty installation token"
+[[ "$INSTALLATION_TOKEN" == "$CLEANUP_TOKEN" ]] || fail "installation-token validation mismatch"
+repository_full_name="$(jq -er '.repositories[0].full_name' "$API_RESPONSE_FILE")" \
+  || fail "GitHub returned no repository identity"
+token_expires_at="$(jq -er '.expires_at' "$API_RESPONSE_FILE")" \
+  || fail "GitHub returned no installation-token expiry"
+token_expires_epoch="$(date -j -u -f '%Y-%m-%dT%H:%M:%SZ' "$token_expires_at" '+%s' 2>/dev/null)" \
+  || fail "GitHub returned an invalid installation-token expiry"
+token_lifetime="$((token_expires_epoch - $(date +%s)))"
+if ((token_lifetime < MIN_TOKEN_LIFETIME_SECONDS \
+  || token_lifetime > MAX_TOKEN_LIFETIME_SECONDS)); then
+  fail "GitHub returned an unexpected installation-token lifetime"
+fi
+unset token_expires_at token_expires_epoch token_lifetime request_body installation_id installation_owner
+JWT=""
+rm -f "$API_RESPONSE_FILE" "$AUTH_HEADER_FILE"
+
+cat >"$ASKPASS_FILE" <<'EOF'
+#!/bin/sh
+case "$1" in
+  *Username*) printf '%s\n' 'x-access-token' ;;
+  *Password*) printf '%s\n' "$XDEGA_BOT_GITHUB_TOKEN" ;;
+  *) exit 1 ;;
+esac
+EOF
+chmod 700 "$ASKPASS_FILE"
+mkdir -m 700 "$GH_CONFIG_DIR"
+
+app_git() {
+  GIT_ASKPASS="$ASKPASS_FILE" \
+  GIT_CONFIG_GLOBAL=/dev/null \
+  GIT_CONFIG_NOSYSTEM=1 \
+  GIT_TERMINAL_PROMPT=0 \
+  XDEGA_BOT_GITHUB_TOKEN="$INSTALLATION_TOKEN" \
+    git -c credential.helper= \
+      -c credential.useHttpPath=true \
+      -c core.hooksPath=/dev/null \
+      -c http.extraHeader= \
+      -c http.proxy= \
+      -c https.proxy= \
+      -c http.sslVerify=true \
+      "$@"
+}
+
+app_gh() {
+  GH_CONFIG_DIR="$GH_CONFIG_DIR" \
+  GH_HOST="github.com" \
+  GH_TOKEN="$INSTALLATION_TOKEN" \
+    gh "$@"
+}
+
+CURRENT_BRANCH="$(git branch --show-current)"
+if [[ "$CURRENT_BRANCH" != "$BRANCH_NAME" ]]; then
+  if git show-ref --verify --quiet "refs/heads/$BRANCH_NAME"; then
+    git switch -- "$BRANCH_NAME"
+  else
+    git switch -c "$BRANCH_NAME"
+  fi
+fi
+
+repository_push_url="https://github.com/$repository_full_name.git"
+app_git fetch --quiet "$repository_push_url" \
+  "refs/heads/$BASE_BRANCH:refs/remotes/origin/$BASE_BRANCH"
+
+if ! git diff --cached --quiet; then
+  GIT_AUTHOR_NAME="$BOT_LOGIN" \
+  GIT_AUTHOR_EMAIL="$BOT_EMAIL" \
+  GIT_COMMITTER_NAME="$BOT_LOGIN" \
+  GIT_COMMITTER_EMAIL="$BOT_EMAIL" \
+    git -c core.hooksPath=/dev/null \
+      -c user.name="$BOT_LOGIN" \
+      -c user.email="$BOT_EMAIL" \
+      commit -m "$COMMIT_MESSAGE"
+elif [[ -n "$(git status --porcelain)" ]]; then
+  fail "worktree has unstaged changes; review and stage only the files intended for the bot commit"
+fi
+
+commit_count="$(git rev-list --count "origin/$BASE_BRANCH..HEAD")"
+[[ "$commit_count" -gt 0 ]] \
+  || fail "branch has no commits to include in a PR against '$BASE_BRANCH'"
+
+app_git push "$repository_push_url" \
+  "refs/heads/$BRANCH_NAME:refs/heads/$BRANCH_NAME"
+git update-ref "refs/remotes/origin/$BRANCH_NAME" HEAD
+git branch --set-upstream-to="origin/$BRANCH_NAME" "$BRANCH_NAME" >/dev/null
+
+EXISTING_PR="$(app_gh pr list \
+  --repo "$repository_full_name" \
+  --head "$BRANCH_NAME" \
+  --base "$BASE_BRANCH" \
+  --state open \
+  --json url \
+  --jq '.[0].url')"
+if [[ -n "$EXISTING_PR" ]]; then
+  echo "Pull request already exists: $EXISTING_PR"
+else
+  create_args=(
+    pr create
+    --repo "$repository_full_name"
+    --base "$BASE_BRANCH"
+    --head "$BRANCH_NAME"
+    --title "$PR_TITLE"
+    --body-file "$PR_BODY_FILE"
+  )
+  if [[ "$PR_DRAFT" == "true" ]]; then
+    create_args+=(--draft)
+  fi
+  app_gh "${create_args[@]}"
+fi

@@ -2,6 +2,7 @@
 # Homebrew (FIRST)
 # =========================
 eval "$(/Users/liam/homebrew/bin/brew shellenv)"
+export PATH="$HOME/.local/bin:$PATH"
 
 # =========================
 # Ruby (rbenv)
